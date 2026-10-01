@@ -28,8 +28,10 @@ With `deny=1 delay=10`:
 1. A failed attempt → counter +1, timestamp = now. The error message is shown
    immediately.
 2. Any attempt within the next 10 seconds → **refused** (even with the
-   correct password). The window **slides**: every refusal restarts the
-   10-second countdown, so continuous guessing is held off indefinitely.
+   correct password). The window **slides**: every *failed* attempt restarts
+   the 10-second countdown, so continuous guessing is held off indefinitely.
+   A refusal on an active window does not extend the timer — a correct
+   password is not a failed attempt.
 3. A quiet period longer than 10 seconds → the refusal lapses, the counter
    resets.
 4. The counter does not affect refusal length: it is always exactly `delay`
@@ -105,6 +107,34 @@ Changes to `/etc/pam.d/common-auth` are made separately, by hand — the diff
 and explanation are in `PAM-CONFIG.md`. The state directory
 `/var/lib/pam_failguard` is created by the module itself.
 
+## The window is not extended by a refusal
+
+A refusal on an active window **does not move the timer**. The window is
+always counted from the last failed attempt.
+
+Extension here broke screen unlocking. The `gnome-screensaver` lock dialog
+re-authenticates every 3 seconds and has a hard limit of `MAX_FAILURES = 5`
+attempts, after which the window closes for good
+(`src/gnome-screensaver-dialog.c`, `auth_check_idle`). While the window was
+extended it never expired as long as the user kept pressing Enter, so:
+
+* unlocking the screen was impossible in principle;
+* after 5 attempts the dialog closed, and one had to leave and log in
+  through the main login window.
+
+Measured on both versions, the scenario "failure, then a correct password
+every 3 seconds":
+
+| Version | Result |
+|---|---|
+| with extension | 5 refusals in a row, entry impossible, the dialog closes |
+| without extension | 2 refusals, then entry |
+
+This is exactly the "refuse for exactly 10 seconds" requirement: a correct
+password rejected because of the window is not a failed attempt and must not
+move the timer. The sliding window is preserved — every *failed* attempt
+updates the timestamp.
+
 ## Failure modes
 
 * Any I/O error → `PAM_IGNORE`; login is **not** blocked. A broken state
@@ -141,7 +171,7 @@ Real `su` client in a pseudo-terminal:
 | correct password, no prior failures | 0.03 s | login |
 | wrong password | 2.20 s | refused |
 | **correct immediately after** | 1.94 s | **refused** |
-| **correct once more** | 2.35 s | **refused** — the window slides |
+| **correct once more** | 2.35 s | **refused** |
 | correct after an 11 s pause | 0.03 s | login |
 | wrong again | 1.61 s | refused |
 | correct immediately | 2.21 s | refused |

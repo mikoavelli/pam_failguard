@@ -92,6 +92,8 @@ typedef struct pam_handle pam_handle_t;
 #define PAM_AUTH_ERR       7
 #define PAM_IGNORE        25
 
+#define PAM_SILENT      0x8000
+
 extern int  pam_get_user(pam_handle_t *pamh, const char **user, const char *prompt);
 extern void pam_syslog(const pam_handle_t *pamh, int priority, const char *format, ...);
 
@@ -249,8 +251,6 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv)
     int fd;
     int ret = PAM_IGNORE;
 
-    (void)flags;
-
     if (!parse_args(argc, argv, &o)) {
         log_msg(pamh, LOG_ERR,
                 "pam_failguard: invalid module arguments, authentication not restricted");
@@ -259,6 +259,26 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv)
 
     if (pam_get_user(pamh, &username, NULL) != PAM_SUCCESS ||
         !usable_name(username)) {
+        return PAM_IGNORE;
+    }
+
+    if (flags & PAM_SILENT) {
+        /* A service call WITHOUT a password request: the user entered
+         * nothing, so there was no failed attempt and none must be
+         * counted.
+         *
+         * gnome-screensaver makes exactly such a call when locking the
+         * screen (Win+L), authenticating the user, and keeps making it
+         * while the screen is locked. Without this check every service
+         * check counted as a failure and opened the refusal window right
+         * at the moment the user starts typing the password, and the next
+         * check extended it. Unlocking the screen was then impossible
+         * altogether. */
+        if (o.debug) {
+            log_msg(pamh, LOG_DEBUG,
+                    "pam_failguard: PAM_SILENT call for user [%s], ignored",
+                    username);
+        }
         return PAM_IGNORE;
     }
 
@@ -340,10 +360,20 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv)
             if (left < 1)
                 left = 1;
 
-            /* sliding window: extend the refusal anew */
-            st.last = now;
-            (void)write_state(fd, &st);
-
+            /* The window is NOT extended: the refusal is counted from the
+             * last FAILED attempt recorded by the record module.
+             *
+             * Extending here would be the self-evident, but breaking,
+             * mistake: a correct password is not a failed attempt, so the
+             * timer must not move because of it. The screen lock dialog
+             * (gnome-screensaver) re-checks every 3 seconds and gives up
+             * after MAX_FAILURES=5 attempts, closing the window entirely.
+             * With extension the window never expired while the user kept
+             * pressing Enter, and the screen could not be unlocked - one
+             * had to leave and log in through the main login window.
+             *
+             * The sliding window is preserved even so: every new failed
+             * attempt updates the timestamp in the record module. */
             log_msg(pamh, LOG_NOTICE,
                     "pam_failguard: authentication refused for user [%s], %ld failed logins, "
                     "%ld s remaining",
