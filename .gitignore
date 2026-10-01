@@ -1,0 +1,2 @@
+pam_failguard.so
+*.o
