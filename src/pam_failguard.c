@@ -75,6 +75,7 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <pwd.h>
 #include <syslog.h>
 
 /* ------------------------------------------------------------------ *
@@ -98,6 +99,14 @@ extern int  pam_get_user(pam_handle_t *pamh, const char **user, const char *prom
 extern void pam_syslog(const pam_handle_t *pamh, int priority, const char *format, ...);
 
 #define STATE_DIR "/var/lib/pam_failguard"
+/*
+ * The state directory is owned by root with mode 0711, not 0700: the PAM
+ * stack during screen unlocking (gnome-screensaver) runs AS THE USER, not
+ * as root, and must be able to reach its own state file. The traverse bit
+ * (x) grants access to the file by its known name but does not allow
+ * listing the directory. The user has no write access to the directory.
+ */
+#define STATE_DIR_MODE 0711
 #define USERNAME_MAX 256
 #define PATH_MAX_LEN 512      /* STATE_DIR + USERNAME_MAX + separator */
 
@@ -197,6 +206,61 @@ open_state(const char *name, char *path, size_t pathlen)
     return open(path, O_RDWR | O_CREAT, 0600);
 }
 
+/* Create the state directory or fix its permissions.
+ * 0 - ok, 1 - state unavailable (exit silently), -1 - error (log it) */
+static int
+ensure_state_dir(pam_handle_t *pamh)
+{
+    struct stat st;
+
+    if (mkdir(STATE_DIR, STATE_DIR_MODE) == -1 && errno != EEXIST) {
+        /* Directory not created and cannot be created: the typical case is
+         * screen unlocking, where PAM runs as the user. A warning here is
+         * only noise: login is not blocked either way. */
+        if (geteuid() != 0)
+            return 1;
+        log_msg(pamh, LOG_WARNING,
+                "pam_failguard: cannot create %s (%s), authentication not restricted",
+                STATE_DIR, strerror(errno));
+        return -1;
+    }
+
+    /* Older versions created the directory with 0700 - the user could not
+     * reach it. Fix it when we are root. */
+    if (geteuid() == 0 && stat(STATE_DIR, &st) == 0 &&
+        (st.st_mode & 07777) != STATE_DIR_MODE) {
+        if (chmod(STATE_DIR, STATE_DIR_MODE) == -1) {
+            log_msg(pamh, LOG_WARNING,
+                    "pam_failguard: cannot set mode of %s (%s)",
+                    STATE_DIR, strerror(errno));
+        }
+    }
+    return 0;
+}
+
+/*
+ * The state file is chowned to the account owner. Otherwise the PAM stack
+ * running as the user (screen unlock) could not open it.
+ * No security impact: a user can write state only for their own account,
+ * and the directory forbids creating new files.
+ */
+static void
+own_state_file(int fd, const char *username)
+{
+    struct passwd *pw;
+
+    if (geteuid() != 0)
+        return;                   /* not our file - do not touch its ownership */
+
+    pw = getpwnam(username);
+    if (pw == NULL)
+        return;
+
+    if (fchown(fd, pw->pw_uid, pw->pw_gid) == -1) {
+        /* not critical: root reads and writes the file regardless of mode */
+    }
+}
+
 static int
 read_state(int fd, struct state *st)
 {
@@ -284,20 +348,35 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv)
 
     now = (long)time(NULL);
 
-    if (mkdir(STATE_DIR, 0700) == -1 && errno != EEXIST) {
-        log_msg(pamh, LOG_WARNING,
-                "pam_failguard: cannot create %s (%s), authentication not restricted",
-                STATE_DIR, strerror(errno));
+    if (ensure_state_dir(pamh) != 0) {
+        if (o.debug) {
+            log_msg(pamh, LOG_DEBUG,
+                    "pam_failguard: state directory unavailable, authentication not restricted");
+        }
         return PAM_IGNORE;
     }
 
     fd = open_state(username, path, sizeof(path));
     if (fd < 0) {
+        /* The PAM stack during screen unlocking runs as the user and cannot
+         * create a file in the state directory: it is owned by root. This
+         * is not a reason to block login - exit silently; the file will be
+         * created on a root-side call (su, sudo, ssh, login window). */
+        if (geteuid() != 0 && (errno == EACCES || errno == EPERM ||
+                               errno == ENOENT)) {
+            if (o.debug) {
+                log_msg(pamh, LOG_DEBUG,
+                        "pam_failguard: no state file for user [%s] (%s), not restricted",
+                        username, strerror(errno));
+            }
+            return PAM_IGNORE;
+        }
         log_msg(pamh, LOG_WARNING,
                 "pam_failguard: cannot open state file (%s), authentication not restricted",
                 strerror(errno));
         return PAM_IGNORE;
     }
+    own_state_file(fd, username);
     if (flock(fd, LOCK_EX) == -1) {
         /* do not block login over a file-locking problem */
         close(fd);

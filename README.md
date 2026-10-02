@@ -140,9 +140,8 @@ updates the timestamp.
 * Any I/O error → `PAM_IGNORE`; login is **not** blocked. A broken state
   directory must not lock accounts out.
 * Clock moved backwards → the timestamp counts as expired (also open).
-* Authentication that never asks for a password at all (e.g. by a public
-  key) creates no false failure record — the module does not get in the way
-  of such logins.
+* Calls with the `PAM_SILENT` flag are ignored: no password is requested in
+  them, hence no failed attempt.
 * State decays by itself: no manual unlock needed.
 
 ### State directory permissions
@@ -188,22 +187,17 @@ Greeter input cannot be driven automatically, so the greeter paths were tested
 by hand. The table above uses a real `su` client in a pseudo-terminal — a real
 login path, not the module in isolation.
 
-### State directory permissions
+### Screen lock
 
-`/var/lib/pam_failguard` is created with mode **0711** owned by root, while a
-state file is chowned to the account owner (`0600`).
+Tested on the real dialog `/usr/lib/gnome-screensaver/gnome-screensaver-dialog`
+(not a simulation), the full bug scenario:
 
-This matters: during **screen unlock** the PAM stack runs as the user, not
-root (`pam_unix(gnome-screensaver:auth): ... uid=1000
-euid=1000`). With `0700` the user could not open their own file, the module
-logged `cannot open state file (Permission denied)` and **did not work at
-all** on the lock screen.
-
-The traverse bit (`x`) grants access to one's own file by its known name but
-not the right to list the directory; the directory denies user writes, so the
-state for another account cannot be forged. If a user's state file does not
-exist yet (no root-side call happened), the module exits quietly without
-restriction — login must never be blocked.
+| Step | Result |
+|---|---|
+| lock window shown, a failed attempt | refusal window active |
+| correct password immediately | **refused**, `1 failed logins, 7 s remaining` |
+| 12 s pause | window expired |
+| correct password again | **unlock**, `RESPONSE=OK` |
 
 ## Files
 
