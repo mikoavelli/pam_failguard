@@ -39,10 +39,16 @@ make uninstall
 The build must happen **on the target system**, for its architecture: a `.so`
 copied from another machine will not load. Carry the source instead.
 
-The module is not linked with `libpam` — of the undefined symbols it has only
-`pam_get_user` and `pam_syslog`, which resolve at load time from the
-`libpam.so.0` of the process that pulls the module in. The only real
-dependency is `libc`.
+### What else to know about installation
+
+Three things that make the module silently do nothing on the lock screen
+(linking with `libpam`, two install directories, the per-process cache of
+failed loads) are covered in `README.md`, section "Three things that break the
+module". They are not repeated here.
+
+For the config changes one fact matters: the lock-screen service pulls
+`common-auth` through `@include`, so its own file needs no editing — neither
+in GNOME (`gnome-screensaver`) nor in Unity 15.10 (`unity`).
 
 ## Three edits to `/etc/pam.d/common-auth`
 
@@ -149,11 +155,17 @@ every login path at once, without touching service files:
 |---|---|
 | `sudo` | yes |
 | `lightdm` (login window) | yes |
-| `gnome-screensaver` (screen lock) | yes |
+| `gnome-screensaver` (screen lock, GNOME) | yes |
+| `unity` (screen lock, Ubuntu 15.10) | yes |
 | `su` | yes |
 | `login` | yes |
 | `sshd` | yes |
 | `lightdm-greeter` | no — a greeter session of its own; no password is entered there |
+
+The lock-screen service name depends on the desktop: in GNOME it is
+`gnome-screensaver`, in Unity 15.10 it is `unity` (served by `compiz`). Check
+the actual name in `/var/log/auth.log` after a failed attempt:
+`pam_unix(<service>:auth): authentication failure`.
 
 ---
 

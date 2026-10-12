@@ -93,13 +93,93 @@ Linux-PAM ABI declarations live in the source itself.
 ```sh
 make
 # or directly:
-cc -Wall -O2 -fPIC -shared -o pam_failguard.so src/pam_failguard.c
+cc -Wall -O2 -fPIC -shared -o pam_failguard.so src/pam_failguard.c -l:libpam.so.0
 ```
+
+The `-l:libpam.so.0` flag is mandatory: without it the module does not load in
+processes that do not link libpam themselves — notably the lock screen on
+Ubuntu 15.10, where `compiz` handles authentication. Linking against the
+versioned soname avoids needing `libpam0g-dev`.
+
+## Three things that break the module
+
+Tested on Ubuntu 15.10 (Unity), i686, PAM 1.1.8. Each one yields a module that
+silently does nothing on the lock screen.
+
+### 1. Linking with libpam
+
+It was assumed unnecessary: symbols like `pam_get_user` and `pam_syslog`
+should resolve from the `libpam.so.0` of whichever process loads the module.
+True for `sshd`, `su`, `sudo`; not true for the lock screen: `compiz` reaches
+PAM through `dlopen`, and its `libpam.so.0` is not global:
+
+```
+compiz: PAM unable to dlopen(pam_failguard.so): undefined symbol: pam_syslog
+compiz: PAM adding faulty module: pam_failguard.so
+```
+
+Fix: `LDFLAGS ?= -l:libpam.so.0` in the `Makefile`.
+
+### 2. Install directories
+
+PAM does not search a single module path, and the set of paths depends on how
+the process linked libpam:
+
+| Directory | Who searches it |
+|---|---|
+| `/lib/i386-linux-gnu/security` | the stock PAM library: `sshd`, `su`, `sudo`, `login` |
+| `/lib/security` | `compiz` — the lock screen |
+
+`make install` puts the module in both (`PAMDIRS`) and reports per directory.
+Without the `/lib/security` copy:
+
+```
+compiz: PAM unable to dlopen(pam_failguard.so): /lib/security/pam_failguard.so:
+        cannot open shared object file: No such file or directory
+```
+
+This error masks the next one — until the path is fixed, `undefined symbol`
+is invisible.
+
+### 3. Cache of failed loads
+
+Linux-PAM remembers modules that failed to load **within a process** and never
+retries them. So after fixing the `.so`, the process holding the lock screen
+must be restarted — in practice, re-login. Otherwise it keeps going with a
+poisoned entry and the module stays silently inactive.
+
+### Who actually authenticates the lock screen
+
+On Ubuntu 15.10 the session is Unity, and unlocking is handled by **`compiz`**
+using the **`unity`** PAM service, not `gnome-screensaver`:
+
+```
+compiz: pam_unix(unity:auth): authentication failure;
+        logname= uid=1000 euid=1000 tty= ruser= rhost=  user=test
+```
+
+The `gnome-screensaver` daemon never runs in Unity: its autostart file says
+`OnlyShowIn=GNOME-Flashback`. That is why `Ctrl+Alt+L` and
+`gnome-screensaver-command -l` do not work there. `/etc/pam.d/unity` needs no
+editing — it pulls `common-auth` through `@include`.
+
+You can find the lock-screen service name from `auth.log` after a failed
+attempt: `pam_unix(<service>:auth): authentication failure`. In GNOME it is
+`gnome-screensaver`; in Unity 15.10 it is `unity`.
+
+### Building on an EOL distro
+
+Ubuntu 15.10 is no longer maintained: the `wily` branches on
+`us.archive.ubuntu.com` and `security.ubuntu.com` return 404; only
+`old-releases.ubuntu.com` still has them. If those addresses remain in
+`/etc/apt/sources.list`, `apt-get update` fails — and with it any build or
+install. Every line must be switched to `old-releases.ubuntu.com`. This has
+nothing to do with the module itself, but nothing can be installed without it.
 
 ## Install and rollback
 
 ```sh
-make install     # build and place the module into the PAM modules directory
+make install     # build and place the module into both PAM directories
 make uninstall   # remove the module
 ```
 
@@ -150,10 +230,17 @@ updates the timestamp.
 state file is chowned to the account owner (`0600`).
 
 This matters: during **screen unlock** the PAM stack runs as the user, not
-root (`pam_unix(gnome-screensaver:auth): ... uid=1000
-euid=1000`). With `0700` the user could not open their own file, the module
-logged `cannot open state file (Permission denied)` and **did not work at
-all** on the lock screen.
+root. Measured on Ubuntu 15.10 (Unity), where `compiz` authenticates the
+unlock:
+
+```
+compiz: pam_unix(unity:auth): authentication failure;
+        logname= uid=1000 euid=1000 tty= ruser= rhost=  user=test
+```
+
+With `0700` the user could not open their file, the module logged
+`cannot open state file (Permission denied)` and **did not work at all** on
+the lock screen.
 
 The traverse bit (`x`) grants access to one's own file by its known name but
 not the right to list the directory; the directory denies user writes, so the
@@ -189,21 +276,21 @@ login path, not the module in isolation.
 
 ### Screen lock
 
-Tested on the real dialog `/usr/lib/gnome-screensaver/gnome-screensaver-dialog`
-(not a simulation), the full bug scenario:
+On Ubuntu 15.10 (Unity) tested against the real lock screen, authenticated by
+`compiz`:
 
 | Step | Result |
 |---|---|
-| lock window shown, a failed attempt | refusal window active |
-| correct password immediately | **refused**, `1 failed logins, 7 s remaining` |
-| 12 s pause | window expired |
-| correct password again | **unlock**, `RESPONSE=OK` |
+| wrong password | refusal window active, state recorded |
+| correct password immediately | **refused**, `1 failed logins, 6 s remaining` |
+| pause longer than 10 s | window expired, the state file removed by expiry |
+| correct password again | **unlock** |
 
 ## Files
 
 ```
 src/pam_failguard.c              module source
-Makefile                         build
+Makefile                         build and install into both PAM directories
 etc/pam.d/common-auth            resulting config (snapshot from the system)
 etc/pam.d/common-auth.pristine   original config (snapshot from the system)
 PAM-CONFIG.md                    all PAM configuration changes
