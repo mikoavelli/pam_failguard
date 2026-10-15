@@ -248,6 +248,21 @@ state for another account cannot be forged. If a user's state file does not
 exist yet (no root-side call happened), the module exits quietly without
 restriction — login must never be blocked.
 
+The state file is **never deleted**. The unlock stack needs it: it runs as the
+user and cannot create the file afresh in a root-owned directory. The file is
+created by the first root-side call (login window, `ssh`, `su`, `sudo`) — i.e.
+the user's first login — and stays put. What expires is the counter, not the
+file: it resets by age rather than being removed.
+
+Previously the expired file was deleted, and that broke exactly the case the
+module exists for. `unlink()` does not close an already-open descriptor, so
+the next write went to an unnamed file and the just-counted failure vanished.
+Waiting longer than `delay` after a past failure was enough for the next
+failure to stop counting and a correct password to be accepted immediately.
+Worse, nobody could recreate the deleted file: the user-side stack (lock
+screen) cannot create files in the root directory, and the module stayed
+inactive until a `su`/`ssh`/login-window entry happened.
+
 ## Measured results (Ubuntu 15.10, PAM 1.1.8, i686)
 
 Real `su` client in a pseudo-terminal:
@@ -282,9 +297,9 @@ On Ubuntu 15.10 (Unity) tested against the real lock screen, authenticated by
 | Step | Result |
 |---|---|
 | wrong password | refusal window active, state recorded |
-| correct password immediately | **refused**, `1 failed logins, 6 s remaining` |
-| pause longer than 10 s | window expired, the state file removed by expiry |
-| correct password again | **unlock** |
+| correct password immediately | **refused**: `pam_failguard(unity:auth): authentication refused …, 4 s remaining` |
+| pause longer than 10 s | window expired, counter reset — the state file is still there |
+| correct password again | **unlock** (`gkr-pam: unlocked login keyring`) |
 
 ## Files
 

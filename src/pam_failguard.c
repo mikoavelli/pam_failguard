@@ -43,9 +43,11 @@
  * STATE
  *   /var/lib/pam_failguard/<user> holds "count time".
  *   The state decays by itself: if more than delay has passed between
- *   attempts, the counter resets and the expired file is deleted.
- *   Therefore nothing accumulates, nothing survives a reboot, and no
- *   manual unlock is needed.
+ *   attempts, the counter resets. The file itself is NOT removed: it is
+ *   owned by the user and is needed by the screen-unlock stack, which runs
+ *   as the user and cannot recreate it in the root-owned directory.
+ *   Therefore nothing accumulates (the counter is always bounded by the
+ *   window) and no manual unlock is needed.
  *
  * REFUSAL UNDER TIME (sliding window)
  *   Every refusal restarts the delay countdown, so continuous guessing is
@@ -101,10 +103,13 @@ extern void pam_syslog(const pam_handle_t *pamh, int priority, const char *forma
 #define STATE_DIR "/var/lib/pam_failguard"
 /*
  * The state directory is owned by root with mode 0711, not 0700: the PAM
- * stack during screen unlocking (gnome-screensaver) runs AS THE USER, not
- * as root, and must be able to reach its own state file. The traverse bit
- * (x) grants access to the file by its known name but does not allow
- * listing the directory. The user has no write access to the directory.
+ * stack during screen unlocking runs AS THE USER, not as root, and must be
+ * able to reach its own state file. The traverse bit (x) grants access to
+ * the file by its known name but does not allow listing the directory.
+ * A user cannot create a state file - it is created by the first password
+ * check running as root (login window, ssh, su, sudo), and afterwards it
+ * stays in place and is updated in place (see expired-state handling
+ * below).
  */
 #define STATE_DIR_MODE 0711
 #define USERNAME_MAX 256
@@ -389,16 +394,22 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv)
         st.existed = 0;
     }
 
-    /* the state has expired: the clock moved backwards, or there have
-       been no attempts for a long time. Reset it and remove the file -
-       that is how the state cleans itself up. */
+    /* The state has expired: the clock moved backwards, or more than delay
+       has passed between attempts. Reset the counter - in MEMORY only.
+       Previously the file was also deleted here, and that broke the very
+       case the module exists for. unlink() does not close an open
+       descriptor: the write after unlink went to an unnamed file, and the
+       just-counted failure was lost. Waiting longer than delay after the
+       past failure was enough for the next failed attempt to stop counting
+       and a correct password to be accepted immediately.
+       Moreover, nobody could recreate the deleted file: the screen-unlock
+       stack (compiz, unity service) runs as the user, while the directory
+       is owned by root. Keeping the file means the counter is written back
+       in place on the next failure. */
     if (st.existed && (st.last > now || (now - st.last) >= o.delay)) {
         st.count = 0;
         st.last = 0;
         st.existed = 0;
-        if (unlink(path) == -1 && errno != ENOENT) {
-            /* the file did not go away - not critical, the values are reset */
-        }
     }
 
     if (o.mode == MODE_RECORD) {
