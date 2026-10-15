@@ -220,8 +220,11 @@ updates the timestamp.
 * Any I/O error → `PAM_IGNORE`; login is **not** blocked. A broken state
   directory must not lock accounts out.
 * Clock moved backwards → the timestamp counts as expired (also open).
-* Calls with the `PAM_SILENT` flag are ignored: no password is requested in
-  them, hence no failed attempt.
+* The `PAM_SILENT` flag is deliberately **not** honored. `sudo` passes it on
+  every password request — it prints the `[sudo] password` prompt itself and
+  asks PAM not to duplicate output. Honoring the flag disabled the module for
+  `sudo` entirely: no attempt counted, no refusal happened. There are no
+  silent calls on the lock screen, so nothing would ever be skipped anyway.
 * State decays by itself: no manual unlock needed.
 
 ### State directory permissions
