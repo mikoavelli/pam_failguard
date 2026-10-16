@@ -50,9 +50,12 @@
  *   window) and no manual unlock is needed.
  *
  * REFUSAL UNDER TIME (sliding window)
- *   Every refusal restarts the delay countdown, so continuous guessing is
- *   held off indefinitely. The failure count does not affect the refusal
- *   length: it is always exactly delay seconds and does not grow.
+ *   The timestamp is the moment of the last refusal. Both record (a failed
+ *   password check) and refuse (a refusal on an active window) move it, so
+ *   every attempt inside the window restarts the delay countdown and
+ *   continuous guessing is held off indefinitely. The failure count does
+ *   not affect the refusal length: it is always exactly delay seconds and
+ *   does not grow.
  *
  * FAILURE MODES
  *   Any I/O error is treated as "open" - the module returns PAM_IGNORE and
@@ -437,29 +440,14 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv)
              * timestamp stayed old, and of the ten seconds only what had
              * not yet elapsed while typing remained - 6-9 seconds in
              * practice instead of ten. */
-            long left = o.delay - (now - st.last);
-
-            if (left < 1)
-                left = 1;
-
-            /* The window is NOT extended: the refusal is counted from the
-             * last FAILED attempt recorded by the record module.
-             *
-             * Extending here would be the self-evident, but breaking,
-             * mistake: a correct password is not a failed attempt, so the
-             * timer must not move because of it. The screen lock dialog
-             * (gnome-screensaver) re-checks every 3 seconds and gives up
-             * after MAX_FAILURES=5 attempts, closing the window entirely.
-             * With extension the window never expired while the user kept
-             * pressing Enter, and the screen could not be unlocked - one
-             * had to leave and log in through the main login window.
-             *
-             * The sliding window is preserved even so: every new failed
-             * attempt updates the timestamp in the record module. */
+            st.last = now;
+            if (!write_state(fd, &st)) {
+                log_msg(pamh, LOG_WARNING, "pam_failguard: cannot write state file");
+            }
             log_msg(pamh, LOG_NOTICE,
                     "pam_failguard: authentication refused for user [%s], %ld failed logins, "
-                    "%ld s remaining",
-                    username, st.count, left);
+                    "window restarted, %ld s",
+                    username, st.count, o.delay);
             ret = PAM_AUTH_ERR;
         } else {
             if (o.debug) {

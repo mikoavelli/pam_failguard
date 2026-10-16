@@ -99,10 +99,10 @@ Execution paths:
 
 | Event | What happens |
 |---|---|
-| password correct, window not expired | `pam_unix` → success, jump over `record` and `pam_deny` → `pam_permit` → `refuse` **rejects** |
+| password correct, window not expired | `pam_unix` → success, jump over `record` and `pam_deny` → `pam_permit` → `refuse` **rejects** and moves the timestamp forward |
 | password correct, window expired | `pam_unix` → success → `pam_permit` → `refuse` passes → **login** |
 | password wrong | `pam_unix` → `default=ignore` → `record` **records the timestamp** → `pam_deny` → **refused** |
-| password wrong, the window was active | the same, plus `record` moves the timestamp — the window gets extended |
+| any attempt while the window is active | the timestamp moves to the current moment — the window restarts for `delay` seconds |
 
 ### Why `success=2` instead of `success=1`
 
@@ -141,7 +141,7 @@ and **grant access**.
 | `delay=10` | 10 **seconds** | how long the refusal lasts |
 | `deny=1` | 1 failure | how many failed attempts switch the refusal on |
 | `record` | mode | record the timestamp; only on failure |
-| `refuse` | mode | check the window and refuse, only after a successful check |
+| `refuse` | mode | check the window and refuse (restarting the window), only after a successful check |
 
 Both calls carry both parameters — so each line is fully self-describing. For
 other values, only the text of these two lines changes.

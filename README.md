@@ -27,15 +27,15 @@ With `deny=1 delay=10`:
 
 1. A failed attempt → counter +1, timestamp = now. The error message is shown
    immediately.
-2. Any attempt within the next 10 seconds → **refused** (even with the
-   correct password). The window **slides**: every *failed* attempt restarts
-   the 10-second countdown, so continuous guessing is held off indefinitely.
-   A refusal on an active window does not extend the timer — a correct
-   password is not a failed attempt.
+2. Any attempt within the next 10 seconds → **refused** (even with the correct
+   password). The window **slides**: every attempt inside it — failed, or
+   correct-but-rejected — moves the timestamp forward, so continuous guessing
+   is held off indefinitely.
 3. A quiet period longer than 10 seconds → the refusal lapses, the counter
    resets.
 4. The counter does not affect refusal length: it is always exactly `delay`
-   and never grows.
+   and never grows. A refusal *sets* the window to `delay` seconds from the
+   current attempt; it does not add `delay` to the remainder.
 
 ## The stack
 
@@ -187,33 +187,38 @@ Changes to `/etc/pam.d/common-auth` are made separately, by hand — the diff
 and explanation are in `PAM-CONFIG.md`. The state directory
 `/var/lib/pam_failguard` is created by the module itself.
 
-## The window is not extended by a refusal
+## The window counts from the last refusal
 
-A refusal on an active window **does not move the timer**. The window is
-always counted from the last failed attempt.
+The timestamp is the moment of the **last refusal**, not of the last failed
+password check. Every attempt inside the window moves it forward:
 
-Extension here broke screen unlocking. The `gnome-screensaver` lock dialog
-re-authenticates every 3 seconds and has a hard limit of `MAX_FAILURES = 5`
-attempts, after which the window closes for good
-(`src/gnome-screensaver-dialog.c`, `auth_check_idle`). While the window was
-extended it never expired as long as the user kept pressing Enter, so:
+| time | action | window |
+|---|---|---|
+| 0 s  | wrong password → refused | 0 … 10 |
+| 4 s  | **correct** password → refused | **4 … 14** |
+| 8 s  | **correct** password → refused | **8 … 18** |
+| —    | 10 s pause with no attempts | window expired, counter reset |
 
-* unlocking the screen was impossible in principle;
-* after 5 attempts the dialog closed, and one had to leave and log in
-  through the main login window.
+Entry opens only after **a full `delay`-second pause with zero attempts**. A
+refusal *sets* the window to `delay` seconds from the current attempt; it does
+not add `delay` to the remainder: however many refusals happen in a row, the
+refusal time does not grow.
 
-Measured on both versions, the scenario "failure, then a correct password
-every 3 seconds":
+Previously only a failed password check moved the timestamp, not a refusal.
+Someone stuck in the window with the correct password could retry a few
+seconds later and get in: the timestamp stayed old, and of the ten seconds
+only what had not yet elapsed while typing remained — the window actually
+lasted 6–9 instead of ten.
 
-| Version | Result |
-|---|---|
-| with extension | 5 refusals in a row, entry impossible, the dialog closes |
-| without extension | 2 refusals, then entry |
-
-This is exactly the "refuse for exactly 10 seconds" requirement: a correct
-password rejected because of the window is not a failed attempt and must not
-move the timer. The sliding window is preserved — every *failed* attempt
-updates the timestamp.
+Window extension was once believed to break screen unlocking: the
+`gnome-screensaver` dialog re-authenticates every 3 seconds and closes for
+good after `MAX_FAILURES = 5` attempts (`src/gnome-screensaver-dialog.c`,
+`auth_check_idle`). That does not happen on the target system: in Unity 15.10
+the lock screen is authenticated by `compiz`, which makes no automatic
+retries — one entered attempt produces exactly one log record (tested on the
+VM). Therefore the window cannot fail to expire: as soon as the user stops
+trying for `delay` seconds, entry opens. While they keep trying, they stay
+locked out — precisely the required behavior.
 
 ## Failure modes
 
@@ -283,7 +288,7 @@ Real `su` client in a pseudo-terminal:
 Sample `/var/log/auth.log` line (the log is in English — the system language):
 
 ```
-su[2705]: pam_failguard(su:auth): pam_failguard: authentication refused for user [pamlab], 1 failed logins, 7 s remaining
+su[2705]: pam_failguard(su:auth): pam_failguard: authentication refused for user [pamlab], 1 failed logins, window restarted, 10 s
 ```
 
 ### Test limits
@@ -300,7 +305,7 @@ On Ubuntu 15.10 (Unity) tested against the real lock screen, authenticated by
 | Step | Result |
 |---|---|
 | wrong password | refusal window active, state recorded |
-| correct password immediately | **refused**: `pam_failguard(unity:auth): authentication refused …, 4 s remaining` |
+| correct password immediately | **refused**: `pam_failguard(unity:auth): authentication refused …, window restarted, 10 s` |
 | pause longer than 10 s | window expired, counter reset — the state file is still there |
 | correct password again | **unlock** (`gkr-pam: unlocked login keyring`) |
 
