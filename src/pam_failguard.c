@@ -36,10 +36,6 @@
  *   again". Hence the password check goes first, and the refusal is the
  *   last module.
  *
- *   check  - placed before pam_unix, refuses if a recent failure exists.
- *   record - placed after pam_unix with default=ignore, so it runs ONLY
- *            on failure and records the timestamp.
- *
  * STATE
  *   /var/lib/pam_failguard/<user> holds "count time".
  *   The state decays by itself: if more than delay has passed between
